@@ -990,7 +990,11 @@ impl From<&ResponsesUsage> for crate::completion::Usage {
                 .as_ref()
                 .map(|details| details.cached_tokens)
                 .unwrap_or(0),
-            cache_creation_input_tokens: 0,
+            cache_creation_input_tokens: usage
+                .input_tokens_details
+                .as_ref()
+                .and_then(|details| details.cache_write_tokens)
+                .unwrap_or(0),
             tool_use_prompt_tokens: 0,
             reasoning_tokens: usage
                 .output_tokens_details
@@ -1042,11 +1046,19 @@ impl Add for ResponsesUsage {
 pub struct InputTokensDetails {
     /// Cached tokens from OpenAI
     pub cached_tokens: u64,
+    /// Tokens written to the prompt cache by this request, reported by models
+    /// that bill cache writes. They are counted inside `input_tokens`, not
+    /// beside it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write_tokens: Option<u64>,
 }
 
 impl InputTokensDetails {
     pub(crate) fn new() -> Self {
-        Self { cached_tokens: 0 }
+        Self {
+            cached_tokens: 0,
+            cache_write_tokens: None,
+        }
     }
 }
 
@@ -1055,6 +1067,10 @@ impl Add for InputTokensDetails {
     fn add(self, rhs: Self) -> Self::Output {
         Self {
             cached_tokens: self.cached_tokens + rhs.cached_tokens,
+            cache_write_tokens: add_optional_details(
+                self.cache_write_tokens,
+                rhs.cache_write_tokens,
+            ),
         }
     }
 }
@@ -4239,10 +4255,65 @@ mod tests {
     }
 
     #[test]
+    fn responses_usage_maps_cache_write_tokens_to_cache_creation() {
+        let usage: ResponsesUsage = serde_json::from_value(json!({
+            "input_tokens": 50000,
+            "input_tokens_details": { "cached_tokens": 40000, "cache_write_tokens": 9000 },
+            "output_tokens": 100,
+            "output_tokens_details": { "reasoning_tokens": 20 },
+            "total_tokens": 50100
+        }))
+        .expect("usage with cache writes should deserialize");
+
+        let token_usage = crate::completion::Usage::from(&usage);
+
+        assert_eq!(token_usage.input_tokens, 50000);
+        assert_eq!(token_usage.cached_input_tokens, 40000);
+        assert_eq!(token_usage.cache_creation_input_tokens, 9000);
+    }
+
+    #[test]
+    fn responses_usage_without_cache_write_tokens_reports_none() {
+        let usage: ResponsesUsage = serde_json::from_value(json!({
+            "input_tokens": 100,
+            "input_tokens_details": { "cached_tokens": 25 },
+            "output_tokens": 50,
+            "output_tokens_details": { "reasoning_tokens": 15 },
+            "total_tokens": 150
+        }))
+        .expect("usage without cache writes should deserialize");
+
+        assert_eq!(
+            crate::completion::Usage::from(&usage).cache_creation_input_tokens,
+            0
+        );
+        let reserialized = serde_json::to_value(&usage).expect("usage should serialize");
+        assert!(
+            reserialized["input_tokens_details"]
+                .get("cache_write_tokens")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn input_tokens_details_add_keeps_cache_writes() {
+        let with = |writes| InputTokensDetails {
+            cached_tokens: 1,
+            cache_write_tokens: writes,
+        };
+        assert_eq!((with(Some(3)) + with(Some(4))).cache_write_tokens, Some(7));
+        assert_eq!((with(Some(3)) + with(None)).cache_write_tokens, Some(3));
+        assert_eq!((with(None) + with(None)).cache_write_tokens, None);
+    }
+
+    #[test]
     fn responses_usage_token_usage_preserves_reasoning_tokens() {
         let usage = ResponsesUsage {
             input_tokens: 100,
-            input_tokens_details: Some(InputTokensDetails { cached_tokens: 25 }),
+            input_tokens_details: Some(InputTokensDetails {
+                cached_tokens: 25,
+                cache_write_tokens: None,
+            }),
             output_tokens: 50,
             output_tokens_details: Some(OutputTokensDetails {
                 reasoning_tokens: 15,
@@ -5171,7 +5242,10 @@ mod tests {
         };
         let rhs = ResponsesUsage {
             input_tokens: 3,
-            input_tokens_details: Some(InputTokensDetails { cached_tokens: 2 }),
+            input_tokens_details: Some(InputTokensDetails {
+                cached_tokens: 2,
+                cache_write_tokens: None,
+            }),
             output_tokens: 5,
             output_tokens_details: Some(OutputTokensDetails {
                 reasoning_tokens: 4,

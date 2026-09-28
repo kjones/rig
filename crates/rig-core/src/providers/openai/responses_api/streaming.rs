@@ -1563,8 +1563,9 @@ mod tests {
     };
     use crate::providers::internal::wire::WireEvent;
     use crate::providers::openai::responses_api::{
-        AdditionalParameters, CompletionResponse, IncompleteDetailsReason, OutputTokensDetails,
-        ReasoningSummary, ResponseError, ResponseObject, ResponseStatus, ResponsesUsage,
+        AdditionalParameters, CompletionResponse, IncompleteDetailsReason, InputTokensDetails,
+        OutputTokensDetails, ReasoningSummary, ResponseError, ResponseObject, ResponseStatus,
+        ResponsesUsage,
     };
     use crate::streaming::{RawStreamingChoice, StreamedAssistantContent};
     use crate::test_utils::MockStreamingClient;
@@ -3849,6 +3850,31 @@ data: {completed}
         let response = final_response_from_event(event).await;
         assert_eq!(response.reasoning_context.as_deref(), Some("all_turns"));
         assert_eq!(response.reasoning_metadata.as_ref(), metadata.as_object());
+    }
+
+    #[tokio::test]
+    async fn streamed_completed_usage_reports_cache_writes() {
+        let mut response = sample_response(ResponseStatus::Completed);
+        response.usage = Some(ResponsesUsage {
+            input_tokens: 50000,
+            input_tokens_details: Some(InputTokensDetails {
+                cached_tokens: 40000,
+                cache_write_tokens: Some(9000),
+            }),
+            output_tokens: 5,
+            output_tokens_details: None,
+            total_tokens: 50005,
+        });
+        let event = json!({
+            "type": "response.completed",
+            "sequence_number": 1,
+            "response": response,
+        });
+
+        let final_response = stream_final_from_event(event).await;
+
+        assert_eq!(final_response.usage.cached_input_tokens, 40000);
+        assert_eq!(final_response.usage.cache_creation_input_tokens, 9000);
     }
 
     #[tokio::test]
